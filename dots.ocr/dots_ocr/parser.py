@@ -13,6 +13,8 @@ from dots_ocr.utils.prompts import dict_promptmode_to_prompt
 from dots_ocr.utils.layout_utils import post_process_output, draw_layout_on_image, pre_process_bboxes
 from dots_ocr.utils.format_transformer import layoutjson2md
 
+#metrics_logger
+from dots_ocr.utils.metrics_logger import track_inference
 
 class DotsOCRParser:
     """
@@ -33,6 +35,8 @@ class DotsOCRParser:
             min_pixels=None,
             max_pixels=None,
             use_hf=False,
+            enable_metrics=False,  # Enable metrics logging
+            metrics_filename='metrics.jsonl'
         ):
         self.dpi = dpi
 
@@ -51,6 +55,10 @@ class DotsOCRParser:
         self.max_pixels = max_pixels
 
         self.use_hf = use_hf
+
+        self.enable_metrics = enable_metrics
+        self.metrics_filename = metrics_filename
+
         if self.use_hf:
             self._load_hf_model()
             print(f"use hf model, num_thread will be set to 1")
@@ -165,10 +173,43 @@ class DotsOCRParser:
             image = fetch_image(origin_image, min_pixels=min_pixels, max_pixels=max_pixels)
         input_height, input_width = smart_resize(image.height, image.width)
         prompt = self.get_prompt(prompt_mode, bbox, origin_image, image, min_pixels=min_pixels, max_pixels=max_pixels)
-        if self.use_hf:
-            response = self._inference_with_hf(image, prompt)
+        
+        # Prepare metadata for logging
+        if self.enable_metrics:
+            log_metadata = {
+                'prompt_mode': prompt_mode,
+                'source': source,
+                'page_idx': page_idx,
+                'save_name': save_name,
+                'image_size_origin': f"{origin_image.width}x{origin_image.height}",
+                'image_size_processed': f"{image.width}x{image.height}",
+                'input_size': f"{input_width}x{input_height}",
+                'prompt_length': len(prompt),
+                'backend': 'huggingface' if self.use_hf else 'vllm',
+                'model_name': getattr(self, 'model_name', 'unknown'),
+                'has_bbox': bbox is not None,
+                'fitz_preprocess': fitz_preprocess,
+            }
+            
+            # Determine log file path
+            metrics_log_path = os.path.join(save_dir, self.metrics_filename)
+            
+            # Track inference with metrics
+            with track_inference(metrics_log_path, metadata=log_metadata) as record:
+                if self.use_hf:
+                    response = self._inference_with_hf(image, prompt)
+                else:
+                    response = self._inference_with_vllm(image, prompt)
+                
+                # Add response metrics to the record
+                record['response_length'] = len(response)
         else:
-            response = self._inference_with_vllm(image, prompt)
+            # No metrics - just run inference normally
+            if self.use_hf:
+                response = self._inference_with_hf(image, prompt)
+            else:
+                response = self._inference_with_vllm(image, prompt)
+
         result = {'page_no': page_idx,
             "input_height": input_height,
             "input_width": input_width
@@ -328,7 +369,14 @@ def main():
     parser = argparse.ArgumentParser(
         description="dots.ocr Multilingual Document Layout Parser",
     )
-    
+    parser.add_argument(
+            "--enable_metrics", action='store_true',
+            help="Enable metrics logging (default: disabled)"
+        )
+    parser.add_argument(
+            "--metrics_filename", type=str, default='metrics.jsonl',
+            help="Filename for metrics log (default: metrics.jsonl)"
+        )
     parser.add_argument(
         "input_path", type=str,
         help="Input PDF/image file path"
@@ -408,6 +456,8 @@ def main():
         protocol=args.protocol,
         ip=args.ip,
         port=args.port,
+        enable_metrics=args.enable_metrics,  # NEW
+        metrics_filename=args.metrics_filename,  # NEW
         model_name=args.model_name,
         temperature=args.temperature,
         top_p=args.top_p,
