@@ -1,0 +1,7 @@
+# YOLO Dataset Configuration
+path: /workspace/Sample/yolo_data/OCR
+train: train/images
+val: val/images
+
+nc: 1
+names: ['OCR']
